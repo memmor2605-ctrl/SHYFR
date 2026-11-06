@@ -1,0 +1,62 @@
+name: Build SHYFR
+on:
+  push:
+  workflow_dispatch:
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rozpakuj projekt
+        run: |
+          ZIP=$(ls -t SHYFR*.zip | head -n1)
+          echo "Używam: $ZIP"
+          unzip -q -o "$ZIP"
+          test -f SHYFR/app/build.gradle.kts
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Licencje Android SDK
+        shell: bash {0}
+        run: |
+          mkdir -p "$ANDROID_HOME/licenses"
+          echo -e "\n24333f8a63b6825ea9c5514f83c2829b004d1fee" > "$ANDROID_HOME/licenses/android-sdk-license"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
+          exit 0
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+
+      - name: Zbuduj APK
+        shell: bash
+        working-directory: SHYFR
+        run: gradle assembleDebug --console=plain --warning-mode=none 2>&1 | tee build.log
+
+      - name: BLEDY (krotkie podsumowanie)
+        if: failure()
+        shell: bash {0}
+        working-directory: SHYFR
+        run: |
+          echo "=== BLEDY KOMPILACJI ==="
+          grep -E '^e: |error:|AAPT|Could not|Unresolved|FAILED' build.log | head -60
+          echo "=== CO POSZLO NIE TAK ==="
+          sed -n '/What went wrong/,/^\* Try/p' build.log | head -30
+          exit 0
+
+      - name: Przygotuj plik APK
+        run: cp SHYFR/app/build/outputs/apk/debug/app-debug.apk SHYFR-debug.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shyfr-debug-apk
+          path: SHYFR-debug.apk
+          if-no-files-found: error
