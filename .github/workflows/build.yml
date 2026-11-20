@@ -39,7 +39,7 @@ jobs:
             "platforms;android-36" \
             "build-tools;36.0.0"
 
-      - name: Gradle
+      - name: Gradle 8.13
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.13"
@@ -50,11 +50,7 @@ jobs:
           set -e
 
           ZIP=$(find . -maxdepth 1 -name 'SHYFR*.zip' -type f | head -1)
-
-          if [ -z "$ZIP" ]; then
-            echo "::error::Brak ZIP SHYFR."
-            exit 1
-          fi
+          test -n "$ZIP"
 
           mkdir -p /tmp/shyfr-source
           unzip -q "$ZIP" -d /tmp/shyfr-source
@@ -68,44 +64,46 @@ jobs:
 
           echo "SHYFR_DIR=$PROJECT" >> "$GITHUB_ENV"
 
-      - name: Automatyczna konfiguracja Signal Desugaring
+      - name: Napraw konfigurację Desugaring
         shell: bash
         run: |
           set -e
 
-          FILE="$SHYFR_DIR/app/build.gradle.kts"
-
-          python3 - "$FILE" <<'PY'
+          python3 - "$SHYFR_DIR/app/build.gradle.kts" <<'PY'
+          import re
           import sys
           from pathlib import Path
 
-          p = Path(sys.argv[1])
-          s = p.read_text()
+          path = Path(sys.argv[1])
+          source = path.read_text()
 
-          if "isCoreLibraryDesugaringEnabled" not in s:
-              marker = "compileOptions {"
-              if marker not in s:
-                  raise SystemExit("Nie znaleziono compileOptions w build.gradle.kts")
+          block = """compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+                  isCoreLibraryDesugaringEnabled = true
+              }"""
 
-              s = s.replace(
-                  marker,
-                  marker + "\n        isCoreLibraryDesugaringEnabled = true",
-                  1
+          pattern = r'compileOptions\s*\{[^{}]*\}'
+
+          if re.search(pattern, source):
+              source = re.sub(pattern, block, source, count=1)
+          else:
+              raise SystemExit("Nie znaleziono poprawnego bloku compileOptions")
+
+          if "coreLibraryDesugaring(" not in source:
+              match = re.search(r'dependencies\s*\{', source)
+              if not match:
+                  raise SystemExit("Nie znaleziono dependencies")
+
+              pos = match.end()
+              source = (
+                  source[:pos]
+                  + '\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")'
+                  + source[pos:]
               )
 
-          if "coreLibraryDesugaring(" not in s:
-              marker = "dependencies {"
-              if marker not in s:
-                  raise SystemExit("Nie znaleziono dependencies w build.gradle.kts")
-
-              s = s.replace(
-                  marker,
-                  marker + '\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")',
-                  1
-              )
-
-          p.write_text(s)
-          print("Desugaring skonfigurowany.")
+          path.write_text(source)
+          print("Konfiguracja Desugaring poprawiona.")
           PY
 
       - name: Budowanie APK
@@ -119,12 +117,10 @@ jobs:
             --console=plain \
             2>&1 | tee "$GITHUB_WORKSPACE/build.log"
 
-      - name: Diagnostyka błędów
+      - name: Diagnostyka
         if: failure()
         shell: bash
         run: |
-          echo "=== BŁĘDY SHYFR ==="
-
           if [ -f build.log ]; then
             grep -Ei \
               'error:|^e: |AAPT|Could not|Unresolved|FAILED|What went wrong' \
@@ -137,9 +133,7 @@ jobs:
         if: success()
         run: |
           set -e
-
           APK="$SHYFR_DIR/app/build/outputs/apk/debug/app-debug.apk"
-
           test -s "$APK"
           mkdir -p output
           cp "$APK" output/SHYFR-debug.apk
