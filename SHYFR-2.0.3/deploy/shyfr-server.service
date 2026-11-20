@@ -1,0 +1,24 @@
+[Unit]
+Description=SHYFR 2.0 API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=shyfr
+Group=shyfr
+WorkingDirectory=/opt/shyfr/backend
+EnvironmentFile=/etc/shyfr/server.env
+ExecStart=/usr/bin/python3 -m shyfr_server.server
+Restart=on-failure
+RestartSec=3
+# utwardzenie procesu
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/shyfr
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

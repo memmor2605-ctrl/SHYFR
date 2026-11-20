@@ -1,0 +1,9 @@
+[Unit]
+Description=Codzienna kopia bazy SHYFR 2.0
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

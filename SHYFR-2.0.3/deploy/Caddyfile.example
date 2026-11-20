@@ -1,0 +1,16 @@
+# Reverse proxy z automatycznym TLS. WYMAGA domeny wskazującej na serwer i otwartych portów 80/443 (decyzja właściciela).
+# Zastąp API.TWOJA-DOMENA wlasną domeną. Caddy domyślnie nadpisuje X-Forwarded-For od niezaufanych klientów.
+API.TWOJA-DOMENA {
+    encode zstd gzip
+    request_body { max_size 2MB }
+    reverse_proxy 127.0.0.1:8080 {
+        health_uri /readyz
+        health_interval 15s
+    }
+    header {
+        Strict-Transport-Security "max-age=31536000"
+        X-Content-Type-Options nosniff
+        -Server
+    }
+    log { output file /var/log/caddy/shyfr-access.log }   # UWAGA: logi dostępu zawierają adresy IP; ustaw rotację i krótką retencję
+}
