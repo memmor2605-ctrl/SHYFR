@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Ekran startowy: ciemne tło i znak SHYFR, bez białego błysku przed uruchomieniem interfejsu. -->
+    <style name="Theme.Shyfr" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@drawable/splash_window</item>
+    </style>
+</resources>

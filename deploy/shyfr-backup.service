@@ -1,0 +1,12 @@
+[Unit]
+Description=SHYFR 2.0: kopia zapasowa bazy (z weryfikacją)
+
+[Service]
+Type=oneshot
+User=shyfr
+Group=shyfr
+WorkingDirectory=/opt/shyfr/backend
+EnvironmentFile=/etc/shyfr/server.env
+# plik docelowy musi nie istnieć: nazwa z datą. Kopię trzeba potem skopiować POZA ten serwer (zaszyfrowaną) i testować odtwarzanie.
+ExecStart=/bin/sh -c 'python3 -m shyfr_server.backup backup "$SHYFR_DB_PATH" /var/lib/shyfr/backups/shyfr-$(date +%%Y%%m%%d-%%H%%M%%S).db'
+ExecStartPost=/bin/sh -c 'find /var/lib/shyfr/backups -name "shyfr-*.db" -mtime +14 -delete'
