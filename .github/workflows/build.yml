@@ -1,61 +1,76 @@
-name: Build SHYFR
+
+name: Build SHYFR APK
+
 on:
   push:
   workflow_dispatch:
+
+permissions:
+  contents: read
+
 concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@v4
 
-      - name: Rozpakuj projekt
+    steps:
+      - name: Pobierz repozytorium
+        uses: actions/checkout@v4
+
+      - name: Rozpakuj SHYFR
+        shell: bash
         run: |
           ZIP=$(ls -t SHYFR*.zip | head -n1)
           echo "Używam: $ZIP"
-          unzip -q -o "$ZIP"
+          mkdir -p /tmp/shyfr-unpack SHYFR
+          unzip -q "$ZIP" -d /tmp/shyfr-unpack
+          cp -a /tmp/shyfr-unpack/SHYFR-2.0.3/. SHYFR/
           test -f SHYFR/app/build.gradle.kts
+          test -f SHYFR/settings.gradle.kts
 
-      - uses: actions/setup-java@v4
+      - name: Java 17
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 17
+          java-version: "17"
 
-      - name: Licencje Android SDK
-        shell: bash {0}
+      - name: Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Zainstaluj Android SDK 36
         run: |
-          mkdir -p "$ANDROID_HOME/licenses"
-          echo -e "\n24333f8a63b6825ea9c5514f83c2829b004d1fee" > "$ANDROID_HOME/licenses/android-sdk-license"
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
-          exit 0
+          sdkmanager --install "platforms;android-36" "build-tools;35.0.0"
+          yes | sdkmanager --licenses || true
 
-      - uses: gradle/actions/setup-gradle@v4
+      - name: Gradle 8.13
+        uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: 8.9
+          gradle-version: "8.13"
 
       - name: Zbuduj APK
+        working-directory: SHYFR
         shell: bash
-        working-directory: SHYFR
-        run: gradle assembleDebug --console=plain --warning-mode=none 2>&1 | tee build.log
-
-      - name: BLEDY (krotkie podsumowanie)
-        if: failure()
-        shell: bash {0}
-        working-directory: SHYFR
         run: |
-          echo "=== BLEDY KOMPILACJI ==="
-          grep -E '^e: |error:|AAPT|Could not|Unresolved|FAILED' build.log | head -60
-          echo "=== CO POSZLO NIE TAK ==="
-          sed -n '/What went wrong/,/^\* Try/p' build.log | head -30
-          exit 0
+          gradle assembleDebug --no-daemon --console=plain \
+            -PgitSha=${GITHUB_SHA} 2>&1 | tee build.log
 
-      - name: Przygotuj plik APK
-        run: cp SHYFR/app/build/outputs/apk/debug/app-debug.apk SHYFR-debug.apk
+      - name: Pokaż błędy kompilacji
+        if: failure()
+        working-directory: SHYFR
+        shell: bash
+        run: |
+          grep -E '^e: |error:|AAPT|Could not|Unresolved|FAILED' build.log | head -60 || true
 
-      - uses: actions/upload-artifact@v4
+      - name: Przygotuj APK
+        run: |
+          cp SHYFR/app/build/outputs/apk/debug/app-debug.apk SHYFR-debug.apk
+
+      - name: Udostępnij APK
+        uses: actions/upload-artifact@v4
         with:
           name: shyfr-debug-apk
           path: SHYFR-debug.apk
