@@ -14,9 +14,9 @@ concurrency:
 
 jobs:
   build:
-    name: Build Android APK
+    name: Build SHYFR
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 45
 
     steps:
       - name: Pobierz repozytorium
@@ -33,21 +33,18 @@ jobs:
         with:
           packages: platform-tools
 
-      - name: Zainstaluj wymagane SDK
-        shell: bash
+      - name: Instalacja Android SDK
         run: |
-          set -e
           sdkmanager --install \
             "platforms;android-36" \
-            "build-tools;36.0.0" \
-            "platform-tools"
+            "build-tools;36.0.0"
 
-      - name: Gradle 8.13
+      - name: Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.13"
 
-      - name: Rozpakuj SHYFR
+      - name: Rozpakuj projekt
         shell: bash
         run: |
           set -e
@@ -55,7 +52,7 @@ jobs:
           ZIP=$(find . -maxdepth 1 -name 'SHYFR*.zip' -type f | head -1)
 
           if [ -z "$ZIP" ]; then
-            echo "::error::Nie znaleziono ZIP SHYFR."
+            echo "::error::Brak ZIP SHYFR."
             exit 1
           fi
 
@@ -67,21 +64,54 @@ jobs:
             -not -path '*/.gradle/*' \
             -printf '%h\n' | head -1)
 
-          if [ -z "$PROJECT" ]; then
-            echo "::error::Nie znaleziono projektu Gradle."
-            exit 1
-          fi
-
           test -f "$PROJECT/app/build.gradle.kts"
 
           echo "SHYFR_DIR=$PROJECT" >> "$GITHUB_ENV"
-          echo "Projekt znaleziony: $PROJECT"
+
+      - name: Automatyczna konfiguracja Signal Desugaring
+        shell: bash
+        run: |
+          set -e
+
+          FILE="$SHYFR_DIR/app/build.gradle.kts"
+
+          python3 - "$FILE" <<'PY'
+          import sys
+          from pathlib import Path
+
+          p = Path(sys.argv[1])
+          s = p.read_text()
+
+          if "isCoreLibraryDesugaringEnabled" not in s:
+              marker = "compileOptions {"
+              if marker not in s:
+                  raise SystemExit("Nie znaleziono compileOptions w build.gradle.kts")
+
+              s = s.replace(
+                  marker,
+                  marker + "\n        isCoreLibraryDesugaringEnabled = true",
+                  1
+              )
+
+          if "coreLibraryDesugaring(" not in s:
+              marker = "dependencies {"
+              if marker not in s:
+                  raise SystemExit("Nie znaleziono dependencies w build.gradle.kts")
+
+              s = s.replace(
+                  marker,
+                  marker + '\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")',
+                  1
+              )
+
+          p.write_text(s)
+          print("Desugaring skonfigurowany.")
+          PY
 
       - name: Budowanie APK
         shell: bash
         run: |
-          set +e
-
+          set -o pipefail
           cd "$SHYFR_DIR"
 
           gradle assembleDebug \
@@ -89,10 +119,7 @@ jobs:
             --console=plain \
             2>&1 | tee "$GITHUB_WORKSPACE/build.log"
 
-          RESULT=${PIPESTATUS[0]}
-          exit "$RESULT"
-
-      - name: Pokaż błędy
+      - name: Diagnostyka błędów
         if: failure()
         shell: bash
         run: |
@@ -101,21 +128,19 @@ jobs:
           if [ -f build.log ]; then
             grep -Ei \
               'error:|^e: |AAPT|Could not|Unresolved|FAILED|What went wrong' \
-              build.log | head -80 || true
+              build.log | head -100 || true
           else
-            echo "Brak build.log. Sprawdź wcześniejsze kroki."
+            echo "Błąd przed uruchomieniem Gradle."
           fi
 
       - name: Przygotuj APK
         if: success()
-        shell: bash
         run: |
           set -e
 
           APK="$SHYFR_DIR/app/build/outputs/apk/debug/app-debug.apk"
 
           test -s "$APK"
-
           mkdir -p output
           cp "$APK" output/SHYFR-debug.apk
 
@@ -127,7 +152,7 @@ jobs:
           path: output/SHYFR-debug.apk
           if-no-files-found: error
 
-      - name: Udostępnij log
+      - name: Zapisz log
         if: always()
         uses: actions/upload-artifact@v4
         with:
