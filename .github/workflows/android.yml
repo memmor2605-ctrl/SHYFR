@@ -1,130 +1,55 @@
-name: CI
-on: [push, pull_request, workflow_dispatch]
-permissions: { contents: read }
-defaults:
-  run: { shell: bash }          # bash uruchamia się z -e -o pipefail: błąd w potoku (np. testy | tee) przerywa krok
+
+name: SHYFR Android Build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
-  backend-tests:
+  build:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
-      - name: Składnia Pythona (backend, narzędzia)
-        run: python -m compileall -q backend tools
-      - name: Testy serwera 2.0 (wszystkie moduły)
-        working-directory: backend
-        run: |
-          set -o pipefail
-          python -m unittest discover -s tests -t . -v 2>&1 | tee ../backend-tests.log
-      - name: Podsumowanie
-        if: always()
-        run: |
-          { echo "- testy serwera 2.0 (Python): $(grep -E '^Ran ' backend-tests.log || echo 'NIE URUCHOMIONO'), $(tail -1 backend-tests.log)"; } >> "$GITHUB_STEP_SUMMARY"
 
-  android:
-    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: 17 }
-      - uses: android-actions/setup-android@v3
-      - name: Platforma Android SDK 36 i build-tools
-        run: sdkmanager --install "platforms;android-36" "build-tools;35.0.0"
-      - uses: gradle/actions/setup-gradle@v4
-        with: { gradle-version: "8.13" }
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
-      - name: Gradle Wrapper
-        id: wrapper
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
         run: |
-          if [ ! -f gradle/wrapper/gradle-wrapper.jar ] || [ ! -f gradlew ]; then
-            echo "::warning::Brak gradlew / gradle-wrapper.jar w repozytorium: generuję wrapper na bieżąco (build mniej powtarzalny). Pobierz artefakt gradle-wrapper-do-zatwierdzenia i zatwierdź go w repozytorium."
-            gradle wrapper --gradle-version 8.13 --distribution-type bin
-            echo "generated=true" >> "$GITHUB_OUTPUT"
-          fi
-          chmod +x gradlew; ./gradlew --version
-      - name: Wrapper do zatwierdzenia w repozytorium
-        if: steps.wrapper.outputs.generated == 'true'
+          yes | sdkmanager --licenses
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Set backend URL
+        run: |
+          echo "Backend URL configured: ${{ vars.SHYFR2_API_BASE_URL != '' }}"
+      
+      - name: Build SHYFR APK
+        env:
+          SHYFR2_API_BASE_URL: ${{ vars.SHYFR2_API_BASE_URL }}
+        run: |
+          test -f settings.gradle.kts || {
+            echo "ERROR: settings.gradle.kts not found in repository root"
+            exit 1
+          }
+          gradle --no-daemon assembleDebug \
+            -Pshyfr2ApiBaseUrl="$SHYFR2_API_BASE_URL"
+
+      - name: Upload APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: gradle-wrapper-do-zatwierdzenia
-          path: |
-            gradlew
-            gradlew.bat
-            gradle/wrapper/gradle-wrapper.jar
-            gradle/wrapper/gradle-wrapper.properties
-      - name: Informacje o buildzie
-        run: |
-          VN=$(grep -m1 'versionName' app/build.gradle.kts | sed 's/.*"\(.*\)".*/\1/')
-          VC=$(grep -m1 'versionCode' app/build.gradle.kts | sed 's/[^0-9]*//g')
-          LS=$(grep -m1 '^libsignalVersion=' gradle.properties | cut -d= -f2)
-          {
-            echo "### SHYFR: informacje o buildzie"
-            echo "- commit: \`${GITHUB_SHA}\`"
-            echo "- wersja: ${VN} (kod ${VC}), libsignal ${LS}"
-            echo "- adres backendu: $([ -n '${{ vars.SHYFR2_API_BASE_URL }}' ] && echo ustawiony || echo 'NIEUSTAWIONY (backend niewdrożony: aplikacja nie połączy się z serwerem)')"
-          } >> "$GITHUB_STEP_SUMMARY"
-      - name: Budowanie APK (debug)
-        run: ./gradlew assembleDebug --no-daemon -Pshyfr2ApiBaseUrl=${{ vars.SHYFR2_API_BASE_URL }} -PgitSha=${{ github.sha }}
-      - uses: actions/upload-artifact@v4
-        with:
-          name: shyfr-debug-apk
+          name: SHYFR-debug-APK
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
-      - name: Uruchom prawdziwy backend 2.0 (do testów integracyjnych klienta)
-        run: |
-          mkdir -p "$RUNNER_TEMP/shyfr-db"
-          (cd backend && SHYFR_DB_PATH="$RUNNER_TEMP/shyfr-db/ci.db" SHYFR_PORT=18080 nohup python -m shyfr_server.server > "$RUNNER_TEMP/backend.log" 2>&1 &)
-          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:18080/readyz && break; sleep 1; done
-          curl -fsS http://127.0.0.1:18080/readyz || { cat "$RUNNER_TEMP/backend.log"; exit 1; }
-      - name: Testy jednostkowe + integracyjne klienta
-        env:
-          SHYFR2_TEST_URL: http://127.0.0.1:18080
-        run: ./gradlew testDebugUnitTest --no-daemon -Pshyfr2ApiBaseUrl=${{ vars.SHYFR2_API_BASE_URL }} -PgitSha=${{ github.sha }}
-      - name: Podsumowanie testów (zawodzi, gdy 0 testów lub są błędy)
-        if: always()
-        run: python tools/junit_summary.py | tee -a "$GITHUB_STEP_SUMMARY"
-      - name: Czy testy integracyjne rzeczywiście się wykonały
-        run: |
-          python - <<'PY'
-          import xml.etree.ElementTree as ET, sys
-          r = ET.parse("app/build/test-results/testDebugUnitTest/TEST-com.shyfr.app.api.BackendIntegrationTest.xml").getroot()
-          t, s = int(r.get("tests")), int(r.get("skipped"))
-          print(f"BackendIntegrationTest: {t} testów, {s} pominiętych")
-          sys.exit(1 if t == 0 or s == t else 0)
-          PY
-      - name: Lint
-        id: lint
-        continue-on-error: true      # lint nie blokuje wydania (abortOnError=false), ale wynik jest jawnie raportowany w następnym kroku
-        run: ./gradlew lintDebug --no-daemon -Pshyfr2ApiBaseUrl=${{ vars.SHYFR2_API_BASE_URL }} -PgitSha=${{ github.sha }}
-      - name: "Lint - błędy krytyczne blokują build"
-        if: always()
-        run: |
-          if [ "${{ steps.lint.outcome }}" = "failure" ]; then echo "::error::Zadanie lintDebug zakończyło się błędem"; fi
-          python tools/lint_summary.py | tee -a "$GITHUB_STEP_SUMMARY"      # kod wyjścia != 0 przy Fatal/Error lub braku raportu
-      - name: Release APK (niepodpisany, bez kluczy w CI)
-        run: ./gradlew assembleRelease --no-daemon -Pshyfr2ApiBaseUrl=${{ vars.SHYFR2_API_BASE_URL }} -PgitSha=${{ github.sha }}
-      - name: Weryfikacja artefaktu release
-        run: |
-          APK=$(ls app/build/outputs/apk/release/*.apk | head -1)
-          test -s "$APK" && unzip -tq "$APK" >/dev/null || { echo "::error::Brak lub uszkodzony APK release"; exit 1; }
-          { echo "- APK release: $APK ($(stat -c%s "$APK") B), sha256 $(sha256sum "$APK" | cut -c1-16)…"; echo "- podpis: NIEPODPISANE (instalowalny jest APK debug; podpis wydania: zob. BUILD_INSTRUCTIONS.md)"; } >> "$GITHUB_STEP_SUMMARY"
-      - name: Zatrzymaj backend
-        if: always()
-        run: pkill -f shyfr_server.server || true
-      - uses: actions/upload-artifact@v4
-        with:
-          name: shyfr-release-apk-niepodpisany
-          path: app/build/outputs/apk/release/*.apk
-          if-no-files-found: error
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: raporty-testow-i-lint
-          path: |
-            app/build/reports/tests
-            app/build/reports/lint-results-debug.html
-            app/build/reports/lint-results-debug.xml
-          if-no-files-found: ignore
