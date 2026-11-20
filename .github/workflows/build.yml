@@ -14,23 +14,13 @@ concurrency:
 
 jobs:
   build:
+    name: Build Android APK
     runs-on: ubuntu-latest
     timeout-minutes: 40
 
     steps:
       - name: Pobierz repozytorium
         uses: actions/checkout@v4
-
-      - name: Rozpakuj SHYFR
-        shell: bash
-        run: |
-          ZIP=$(ls -t SHYFR*.zip | head -n1)
-          echo "Używam: $ZIP"
-          mkdir -p /tmp/shyfr-unpack SHYFR
-          unzip -q "$ZIP" -d /tmp/shyfr-unpack
-          cp -a /tmp/shyfr-unpack/SHYFR-2.0.3/. SHYFR/
-          test -f SHYFR/app/build.gradle.kts
-          test -f SHYFR/settings.gradle.kts
 
       - name: Java 17
         uses: actions/setup-java@v4
@@ -41,9 +31,11 @@ jobs:
       - name: Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Zainstaluj Android SDK 36
+      - name: Zainstaluj Android SDK
         run: |
-          sdkmanager --install "platforms;android-36" "build-tools;35.0.0"
+          sdkmanager --install \
+            "platforms;android-36" \
+            "build-tools;36.0.0"
           yes | sdkmanager --licenses || true
 
       - name: Gradle 8.13
@@ -51,27 +43,112 @@ jobs:
         with:
           gradle-version: "8.13"
 
-      - name: Zbuduj APK
-        working-directory: SHYFR
+      - name: Rozpakuj projekt SHYFR
         shell: bash
         run: |
-          gradle assembleDebug --no-daemon --console=plain \
-            -PgitSha=${GITHUB_SHA} 2>&1 | tee build.log
+          set -e
 
-      - name: Pokaż błędy kompilacji
+          ZIP=$(find . -maxdepth 1 -name 'SHYFR*.zip' -type f | head -1)
+
+          if [ -z "$ZIP" ]; then
+            echo "::error::Nie znaleziono ZIP SHYFR w repozytorium."
+            exit 1
+          fi
+
+          echo "Rozpakowuję: $ZIP"
+
+          mkdir -p /tmp/shyfr-source
+          unzip -q "$ZIP" -d /tmp/shyfr-source
+
+          PROJECT=$(find /tmp/shyfr-source \
+            -name settings.gradle.kts \
+            -not -path '*/.gradle/*' \
+            -printf '%h\n' | head -1)
+
+          if [ -z "$PROJECT" ]; then
+            echo "::error::Nie znaleziono settings.gradle.kts."
+            exit 1
+          fi
+
+          if [ ! -f "$PROJECT/app/build.gradle.kts" ]; then
+            echo "::error::Nie znaleziono konfiguracji aplikacji Android."
+            exit 1
+          fi
+
+          echo "SHYFR_DIR=$PROJECT" >> "$GITHUB_ENV"
+          echo "Projekt: $PROJECT"
+
+      - name: Sprawdź konfigurację
+        run: |
+          echo "Katalog: $SHYFR_DIR"
+          test -f "$SHYFR_DIR/gradle.properties"
+          test -f "$SHYFR_DIR/app/build.gradle.kts"
+          grep '^libsignalVersion=' "$SHYFR_DIR/gradle.properties"
+
+      - name: Budowanie APK Debug
+        id: build
+        shell: bash
+        env:
+          SHYFR2_API_BASE_URL: ${{ vars.SHYFR2_API_BASE_URL }}
+          GIT_SHA: ${{ github.sha }}
+        run: |
+          set +e
+
+          cd "$SHYFR_DIR"
+
+          gradle assembleDebug \
+            --no-daemon \
+            --console=plain \
+            --stacktrace \
+            -Pshyfr2ApiBaseUrl="$SHYFR2_API_BASE_URL" \
+            -PgitSha="$GIT_SHA" \
+            2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+
+          RESULT=${PIPESTATUS[0]}
+          exit "$RESULT"
+
+      - name: Podsumowanie błędów
         if: failure()
-        working-directory: SHYFR
         shell: bash
         run: |
-          grep -E '^e: |error:|AAPT|Could not|Unresolved|FAILED' build.log | head -60 || true
+          echo "=== BŁĘDY BUDOWANIA SHYFR ==="
 
-      - name: Przygotuj APK
+          if [ -f "$GITHUB_WORKSPACE/build.log" ]; then
+            grep -Ei \
+              '^e: |error:|AAPT|Could not|Unresolved|FAILED|What went wrong|Execution failed' \
+              "$GITHUB_WORKSPACE/build.log" | head -80 || true
+          else
+            echo "Brak build.log. Błąd wystąpił przed uruchomieniem Gradle."
+          fi
+
+      - name: Sprawdź APK
+        if: success()
         run: |
-          cp SHYFR/app/build/outputs/apk/debug/app-debug.apk SHYFR-debug.apk
+          APK="$SHYFR_DIR/app/build/outputs/apk/debug/app-debug.apk"
+
+          if [ ! -s "$APK" ]; then
+            echo "::error::Nie znaleziono gotowego APK."
+            exit 1
+          fi
+
+          mkdir -p "$GITHUB_WORKSPACE/output"
+          cp "$APK" "$GITHUB_WORKSPACE/output/SHYFR-debug.apk"
+
+          echo "APK przygotowany poprawnie."
+          ls -lh "$GITHUB_WORKSPACE/output/SHYFR-debug.apk"
 
       - name: Udostępnij APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: shyfr-debug-apk
-          path: SHYFR-debug.apk
+          name: SHYFR-debug-APK
+          path: output/SHYFR-debug.apk
           if-no-files-found: error
+
+      - name: Udostępnij log kompilacji
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SHYFR-build-log
+          path: build.log
+          if-no-files-found: ignore
